@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from core.models import ManifestType
 from core.pdf_reader import read_pdf
 from core.pdf_detector import analyze_pdf_structure
 
@@ -31,9 +32,15 @@ def main() -> None:
 
         analysis = analyze_pdf_structure(document)
 
+        detected = analysis.get("detected_type", ManifestType.UNKNOWN)
+        detected_label = detected.value if isinstance(detected, ManifestType) else str(detected)
+
         print(f"Páginas       : {analysis['pages']}")
         print(f"Palabras      : {analysis['total_words']}")
         print(f"Palabras únicas: {analysis['unique_words']}")
+        print(f"Tipo detectado: {detected_label}")
+        print(f"Confianza     : {analysis.get('confidence', 0.0):.1f}%")
+        print(f"Riesgo        : {analysis.get('risk', 'unknown').upper()}")
 
         print("\nPalabras más frecuentes:")
 
