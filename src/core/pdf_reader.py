@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-import fitz
+# Defer importing heavy dependency `fitz` (PyMuPDF) until read_pdf is called
+# so modules that only need the PDF dataclasses can be imported in test/CI
+# without requiring PyMuPDF to be installed.
 
 @dataclass
 class PDFWord:
@@ -26,6 +28,10 @@ class PDFDocument:
 
 
 def read_pdf(file_path: Path) -> PDFDocument:
+    # Local import to avoid requiring PyMuPDF at module import time.
+    # This keeps test/CI fast for code that only needs the PDF dataclasses.
+    import fitz
+
     if not file_path.exists():
         raise FileNotFoundError(
             f"No se encontró el PDF: {file_path}"
