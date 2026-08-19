@@ -165,6 +165,22 @@ def extract_text_lines(document: PDFDocument, max_pages: int | None = 3) -> List
     return lines
 
 
+def extract_text_lines_with_page(document: PDFDocument, max_pages: int | None = None) -> List[tuple]:
+    """Return list of tuples (page_index, y, text) grouped spatially across pages.
+
+    page_index is 1-based.
+    """
+    results: List[tuple] = []
+    pages = document.pages if max_pages is None else document.pages[:max_pages]
+    for page in pages:
+        grouped = group_words_by_line(page)
+        for y, row in grouped:
+            txt = " ".join(clean_text(t) for t in row if clean_text(t))
+            if txt:
+                results.append((page.page_number, y, txt))
+    return results
+
+
 def find_first_matching_line(lines: List[str], patterns: Iterable[str]) -> Tuple[int, str] | Tuple[None, None]:
     """Return (idx, line) of first line containing any normalized pattern, else (None, None)."""
     norms = [normalize_token(p) for p in patterns]
@@ -175,6 +191,77 @@ def find_first_matching_line(lines: List[str], patterns: Iterable[str]) -> Tuple
                 return i, line
     return None, None
 
+
+def find_party_columns(document: PDFDocument, max_pages: int = 3, x_tol: float = 20.0) -> dict:
+    """Detect columns that likely contain SH / CO / NO blocks using top pages.
+
+    Returns mapping like {'SH': x_center, 'CO': x_center, 'NO': x_center} (values in page points).
+    """
+    candidates: dict[str, list[float]] = {"SH": [], "CO": [], "NO": []}
+    tokens = {"SH": ("SH", "SHIPPER"), "CO": ("CO", "CONSIGNEE"), "NO": ("NO", "NOTIFY")}
+    pages = document.pages[:max_pages]
+    for page in pages:
+        for w in page.words:
+            tok = normalize_token(w.text)
+            for key, variants in tokens.items():
+                for v in variants:
+                    if v in tok:
+                        candidates[key].append(w.x0)
+    # cluster by simple average per key
+    centers: dict[str, float] = {}
+    for key, xs in candidates.items():
+        if not xs:
+            continue
+        # average as center
+        centers[key] = sum(xs) / len(xs)
+    return centers
+
+
+def get_column_text(page, x_center: float, x_tol: float = 20.0) -> List[str]:
+    """Extract text lines from a page that fall within x_center +/- x_tol.
+
+    Returns list of strings sorted top->bottom.
+    """
+    lines: dict[float, list[tuple]] = {}
+    for w in page.words:
+        if abs(w.x0 - x_center) <= x_tol:
+            y = round(w.y0)
+            lines.setdefault(y, []).append((w.x0, w.text))
+    result: List[str] = []
+    for y in sorted(lines.keys()):
+        row = [t for _, t in sorted(lines[y], key=lambda it: it[0])]
+        txt = " ".join(clean_text(t) for t in row if clean_text(t))
+        if txt:
+            result.append(txt)
+    return result
+
+
+def parse_parties_spatial(document: PDFDocument, max_pages: int = 3, x_tol: float = 24.0) -> tuple[str, str, str]:
+    """Return a (shipper, consignee, notify) triple using column detection.
+
+    Algorithm:
+    1. Find approximate x-centers for SH/CO/NO by scanning top pages for header tokens.
+    2. For each detected center, extract column text across the first page and join.
+    3. Return joined strings (may be empty).
+
+    This is conservative but more robust than plain text search.
+    """
+    centers = find_party_columns(document, max_pages=max_pages, x_tol=x_tol)
+    shipper = consignee = notify = ""
+    # use first page as canonical location for parties
+    if not document.pages:
+        return shipper, consignee, notify
+    page = document.pages[0]
+    if "SH" in centers:
+        ship_lines = get_column_text(page, centers["SH"], x_tol=x_tol)
+        shipper = " ".join(ship_lines)
+    if "CO" in centers:
+        co_lines = get_column_text(page, centers["CO"], x_tol=x_tol)
+        consignee = " ".join(co_lines)
+    if "NO" in centers:
+        no_lines = get_column_text(page, centers["NO"], x_tol=x_tol)
+        notify = " ".join(no_lines)
+    return shipper, consignee, notify
 
 # Backwards-compatible small helpers
 

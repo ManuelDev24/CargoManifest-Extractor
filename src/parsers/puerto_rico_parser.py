@@ -102,6 +102,9 @@ class PuertoRicoManifestParser(BaseParser):
             import re
             records: List[ManifestRecord] = []
             rec_counter = 0
+
+            shipper_text, consignee_text, notify_text = parse_parties_spatial(document)
+
             for i, line in enumerate(all_lines):
                 m = re.search(r"(PYRR-\d+)", line, re.IGNORECASE)
                 if not m:
@@ -132,6 +135,9 @@ class PuertoRicoManifestParser(BaseParser):
                     has_hazardous=header.get("has_hazardous"),
                     bl_number=bl,
                     description=clean_text(context),
+                    shipper=shipper_text or None,
+                    consignee=consignee_text or None,
+                    notify=notify_text or None,
                 )
                 records.append(record)
 
