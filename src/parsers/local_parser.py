@@ -12,6 +12,7 @@ from parsers.base_parser import (
     parse_weight_from_tokens,
     normalize_token,
     clean_text,
+    parse_parties_spatial,
 )
 
 
