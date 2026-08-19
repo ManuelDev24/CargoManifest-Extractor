@@ -147,25 +147,70 @@ class LocalManifestParser(BaseParser):
 
     def parse(self, document: PDFDocument) -> List[ManifestRecord]:
         try:
-            lines = extract_text_lines(document, max_pages=3)
-            header = self._extract_header(lines)
+            # extract header from first pages
+            header_lines = extract_text_lines(document, max_pages=3)
+            header = self._extract_header(header_lines)
 
-            record = ManifestRecord(
-                source_file=document.file_path,
-                manifest_type=self.manifest_type,
-                page=1,
-                record_number=1,
-                ship_name=header.get("ship_name"),
-                voyage=header.get("voyage"),
-                loading_port=header.get("loading_port"),
-                discharge_port=header.get("discharge_port"),
-                weight_kg=header.get("weight_kg"),
-                weight_lbs=header.get("weight_lbs"),
-                customs_reference=header.get("customs_reference"),
-                has_hazardous=header.get("has_hazardous"),
-            )
+            # search all pages for BL occurrences to create one record per BL
+            all_lines = extract_text_lines(document, max_pages=None)
+            import re
+            records: List[ManifestRecord] = []
+            rec_counter = 0
+            for i, line in enumerate(all_lines):
+                m = re.search(r"(PYRR-\d+)", line, re.IGNORECASE)
+                if not m:
+                    continue
+                bl = m.group(1).upper()
+                rec_counter += 1
 
-            return [record]
+                # gather context tokens (line and next 2 lines)
+                context = line
+                if i + 1 < len(all_lines):
+                    context += " " + all_lines[i + 1]
+                if i + 2 < len(all_lines):
+                    context += " " + all_lines[i + 2]
+
+                # try extract weights from context
+                tokens = [t for t in clean_text(context).split()]
+                kg, lbs, matches = parse_weight_from_tokens(tokens)
+
+                record = ManifestRecord(
+                    source_file=document.file_path,
+                    manifest_type=self.manifest_type,
+                    page=1,
+                    record_number=rec_counter,
+                    ship_name=header.get("ship_name"),
+                    voyage=header.get("voyage"),
+                    loading_port=header.get("loading_port"),
+                    discharge_port=header.get("discharge_port"),
+                    weight_kg=kg,
+                    weight_lbs=lbs,
+                    customs_reference=header.get("customs_reference"),
+                    has_hazardous=header.get("has_hazardous"),
+                    bl_number=bl,
+                    description=clean_text(context),
+                )
+                records.append(record)
+
+            # fallback: if no BLs found, return single header record
+            if not records:
+                rec = ManifestRecord(
+                    source_file=document.file_path,
+                    manifest_type=self.manifest_type,
+                    page=1,
+                    record_number=1,
+                    ship_name=header.get("ship_name"),
+                    voyage=header.get("voyage"),
+                    loading_port=header.get("loading_port"),
+                    discharge_port=header.get("discharge_port"),
+                    weight_kg=header.get("weight_kg"),
+                    weight_lbs=header.get("weight_lbs"),
+                    customs_reference=header.get("customs_reference"),
+                    has_hazardous=header.get("has_hazardous"),
+                )
+                return [rec]
+
+            return records
 
         except Exception as exc:  # pragma: no cover - conservative fallback
             raise ParserError(f"Error parsing RD manifest: {exc}")
