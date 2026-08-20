@@ -54,6 +54,14 @@ def clean_text(value: str | None) -> str:
     return s
 
 
+def clean_optional_value(value: str | None) -> str | None:
+    """Return None for placeholders used by PDFs to represent empty fields."""
+    cleaned = clean_text(value)
+    if not cleaned or cleaned in {"-", "—", "–", "N/A", "N/D"}:
+        return None
+    return cleaned
+
+
 def normalize_token(value: str | None) -> str:
     """Uppercase, remove surrounding punctuation, normalize accents.
 
@@ -133,6 +141,21 @@ def parse_weight_from_tokens(tokens: Iterable[str]) -> Tuple[float | None, float
     return kg, lbs, matches
 
 
+def words_in_rect(page, x0: float, y0: float, x1: float, y1: float) -> List[object]:
+    """Return words whose bounding boxes intersect the given rectangle."""
+    hits: List[object] = []
+    for w in getattr(page, "words", []):
+        if w.x1 >= x0 and w.x0 <= x1 and w.y1 >= y0 and w.y0 <= y1:
+            hits.append(w)
+    return sorted(hits, key=lambda w: (w.y0, w.x0))
+
+
+def rect_text(page, x0: float, y0: float, x1: float, y1: float) -> str:
+    """Extract clean text from a spatial rectangle without using page.extract_text()."""
+    content = " ".join(clean_text(w.text) for w in words_in_rect(page, x0, y0, x1, y1) if clean_text(w.text))
+    return clean_text(content)
+
+
 def group_words_by_line(page, y_tolerance: float = 3.0) -> List[Tuple[float, List[str]]]:
     """Group PDFPage.words by approximate Y coordinate to reconstruct lines.
 
@@ -192,6 +215,48 @@ def find_first_matching_line(lines: List[str], patterns: Iterable[str]) -> Tuple
     return None, None
 
 
+def extract_value_after_label(line: str | None, labels: Iterable[str]) -> str | None:
+    """Return the value that appears after the label, stripping the label itself.
+
+    Examples:
+      "LOADING PORT SAN JUAN (SJU)" with labels=("LOADING PORT",) -> "SAN JUAN (SJU)"
+      "VOYAGE AU034S" with labels=("VOYAGE", "VOYAGE NUMBER") -> "AU034S"
+    """
+    if not line:
+        return None
+    norm_line = normalize_token(line)
+    for label in labels:
+        norm_label = normalize_token(label)
+        if not norm_label or norm_label not in norm_line:
+            continue
+        after = line.split(label, 1)[0] if False else None
+        # Split on a stable, normalized form to preserve the original content after the label.
+        for marker in (label, label.upper(), label.lower()):
+            if marker in line:
+                after = line.split(marker, 1)[1].strip()
+                if after:
+                    return clean_text(after)
+        after = line.split(label, 1)[1].strip() if label in line else ""
+        if after:
+            return clean_text(after)
+    return clean_text(line)
+
+
+def strip_party_label(value: str | None, labels: Iterable[str]) -> str:
+    """Remove leading party labels like SH, SHIPPER, CO, CONSIGNEE, NO, NOTIFY."""
+    text = clean_text(value or "")
+    if not text:
+        return ""
+    for label in labels:
+        norm_label = normalize_token(label)
+        if not norm_label:
+            continue
+        if text.upper().startswith(norm_label):
+            text = text[len(label):].lstrip(" -:;/")
+            break
+    return clean_text(text)
+
+
 def find_party_columns(document: PDFDocument, max_pages: int = 3, x_tol: float = 20.0) -> dict:
     """Detect columns that likely contain SH / CO / NO blocks using top pages.
 
@@ -204,9 +269,8 @@ def find_party_columns(document: PDFDocument, max_pages: int = 3, x_tol: float =
         for w in page.words:
             tok = normalize_token(w.text)
             for key, variants in tokens.items():
-                for v in variants:
-                    if v in tok:
-                        candidates[key].append(w.x0)
+                if tok in {normalize_token(v) for v in variants}:
+                    candidates[key].append(w.x0)
     # cluster by simple average per key
     centers: dict[str, float] = {}
     for key, xs in candidates.items():
@@ -242,7 +306,7 @@ def parse_parties_spatial(document: PDFDocument, max_pages: int = 3, x_tol: floa
     Algorithm:
     1. Find approximate x-centers for SH/CO/NO by scanning top pages for header tokens.
     2. For each detected center, extract column text across the first page and join.
-    3. Return joined strings (may be empty).
+    3. Strip leading SH/CO/NO identifiers and return only the party value.
 
     This is conservative but more robust than plain text search.
     """
@@ -254,14 +318,93 @@ def parse_parties_spatial(document: PDFDocument, max_pages: int = 3, x_tol: floa
     page = document.pages[0]
     if "SH" in centers:
         ship_lines = get_column_text(page, centers["SH"], x_tol=x_tol)
-        shipper = " ".join(ship_lines)
+        shipper = strip_party_label(" ".join(ship_lines), ("SH", "SHIPPER"))
     if "CO" in centers:
         co_lines = get_column_text(page, centers["CO"], x_tol=x_tol)
-        consignee = " ".join(co_lines)
+        consignee = strip_party_label(" ".join(co_lines), ("CO", "CONSIGNEE"))
     if "NO" in centers:
         no_lines = get_column_text(page, centers["NO"], x_tol=x_tol)
-        notify = " ".join(no_lines)
+        notify = strip_party_label(" ".join(no_lines), ("NO", "NOTIFY"))
     return shipper, consignee, notify
+
+
+def parse_party_band(page, y0: float, y1: float) -> tuple[str, str, str]:
+    """Extract SH/CO/NO blocks from one cargo row using the left column."""
+    words = [w for w in getattr(page, "words", []) if 0 <= w.x0 < 175 and y0 <= w.y0 < y1]
+    words.sort(key=lambda w: (w.y0, w.x0))
+    sections: dict[str, list[str]] = {"SH": [], "CO": [], "NO": []}
+    current: str | None = None
+    for word in words:
+        token = normalize_token(word.text)
+        if token in ("SH", "CO", "NO", "NF") and word.x0 < 20:
+            current = "NO" if token == "NF" else token
+            continue
+        if current and clean_text(word.text):
+            value = clean_text(word.text)
+            if not re.fullmatch(r"PYRR-\d{4,7}", value.upper()):
+                sections[current].append(value)
+    return tuple(clean_text(" ".join(sections[key])) for key in ("SH", "CO", "NO"))
+
+
+def parse_equipment_band(page, y0: float, y1: float) -> tuple[str | None, str | None, str | None, str | None, str | None, bool]:
+    """Classify the CN/MN/SN area of one cargo band.
+
+    Returns equipment id, equipment type, marks, seal, AES ITN, and hazardous status. Words are grouped by
+    their visual line so split IDs such as ``PRRU 403684-0`` remain intact.
+    """
+    rows: dict[int, list[object]] = {}
+    for word in getattr(page, "words", []):
+        if 255 <= word.x0 < 375 and y0 <= word.y0 < y1:
+            rows.setdefault(round(word.y0), []).append(word)
+
+    lines = [clean_text(" ".join(w.text for w in sorted(row, key=lambda item: item.x0)))
+             for _, row in sorted(rows.items())]
+    lines = [line for line in lines if line]
+    equipment_id = None
+    equipment_type = None
+    marks = None
+    seal = None
+    aes_itn = None
+    has_hazardous = False
+    seal_values: list[str] = []
+    mark_values: list[str] = []
+
+    for index, line in enumerate(lines):
+        upper = line.upper()
+        id_match = re.search(r"\b([A-Z]{4}\s*\d{4,7}(?:-\d)?|[A-Z0-9]{17})\b", upper)
+        if id_match and equipment_id is None:
+            equipment_id = id_match.group(1).replace(" ", "")
+            continue
+        type_match = re.search(r"\b(\d{2}'\s*[A-Z]+|VEHICLE|TANK|PALLET)\b", upper)
+        if type_match and equipment_type is None:
+            equipment_type = type_match.group(1)
+            continue
+        if "AES" in upper or "ITN" in upper:
+            code_match = re.search(r"\bX[A-Z0-9]+\b", upper)
+            if code_match:
+                aes_itn = code_match.group(0)
+            elif index + 1 < len(lines):
+                next_code = re.search(r"\bX[A-Z0-9]+\b", lines[index + 1].upper())
+                if next_code:
+                    aes_itn = next_code.group(0)
+            continue
+        if upper.startswith("NO EEI") or upper.startswith("REFERENCE SED") or upper.startswith("SED NOT"):
+            continue
+        if "HAZARDOUS" in upper or "\uf071" in upper:
+            has_hazardous = True
+            continue
+        if upper.startswith("X"):
+            continue
+        if upper == "N/A" or re.search(r"[A-Z0-9]{4,}[/-][A-Z0-9]+$", upper) or re.fullmatch(r"[A-Z0-9]{4,}", upper):
+            seal_values.append(line)
+            continue
+        mark_values.append(line)
+
+    if mark_values:
+        marks = clean_text(" | ".join(mark_values))
+    if seal_values:
+        seal = clean_text(" | ".join(seal_values))
+    return equipment_id, equipment_type, marks, seal, aes_itn, has_hazardous
 
 # Backwards-compatible small helpers
 

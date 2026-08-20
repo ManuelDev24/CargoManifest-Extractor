@@ -4,6 +4,19 @@
 
 Automated Python pipeline for extracting and validating structured cargo manifest data from PDF documents, with support for Excel, CSV, JSON, and future SQL Server integration.
 
+## Esquema de salida
+
+Cada fila representa una carga identificada por su B/L. CSV, JSON y Excel usan exactamente estas columnas, en este orden:
+
+```text
+ship_name, voyage, report_port, nationality, name_of_master,
+loading_port, discharge_port, final_destination, date_of_sailing,
+shipper, consignee, notify, bl_number, equipment_id, equipment_type,
+marks, seal, quantity, unit, description, weight_kg, weight_lbs
+```
+
+Los metadatos internos (`source_file`, `manifest_type`, `page` y `record_number`), además de validaciones y referencias aduaneras, no se exportan como columnas de negocio.
+
 ## Ejecutar tests localmente
 
 Se incluye un conjunto de tests unitarios mínimos que se ejecutan en CI. Para ejecutar los tests localmente:
